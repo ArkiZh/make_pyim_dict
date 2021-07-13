@@ -75,4 +75,4 @@ def filter_words(words_file):
     return df_words, chars_info_dict
 
 
-info = filter_words("data/0_words_raw.txt")
+info = filter_words("data/paragraph.txt")

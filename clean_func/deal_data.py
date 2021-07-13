@@ -1,5 +1,7 @@
 import jieba
 import pandas as pd
+from pypinyin import pinyin, load_phrases_dict, Style, load_single_dict
+import copy, functools
 
 
 def generate_words(raw_words_path):
@@ -73,5 +75,94 @@ def filter_words(words_dict):
     return df_words, chars_info_dict
 
 
-words_dict_freq = generate_words(raw_words_path="./data/paragraph.txt")
-df, chars= filter_words(words_dict_freq)
+def generate_pinyin(word):
+    pinyin_with_tone = []
+    pinyin_without_tone = []
+    has_duoyin_with_tone = False
+    has_duoyin_without_tone = False
+    word_error_flag = False
+
+    def flatten(lists):
+        result = []
+        for ll in lists:
+            if len(result) == 0:
+                for e in ll:
+                    result.append([e])
+            else:
+                if len(ll) >= 1:
+                    for e in result:
+                        e.append(ll[0])
+                    if len(ll) > 1:
+                        list_reduce = [result]
+                        for i in range(1, len(ll)):
+                            cur = copy.deepcopy(result)
+                            for e in cur:
+                                e[-1] = ll[i]
+                            list_reduce.append(cur)
+                        result = functools.reduce(lambda x1, x2: x1 + x2, list_reduce)
+        return result
+
+    for c in word:
+        c_with_tone = pinyin(c, style=Style.TONE, heteronym=True, errors=lambda x: "ERROR")
+        if c_with_tone[0] == "ERROR":
+            word_error_flag = True
+            continue
+        if len(c_with_tone[0]) > 1:
+            has_duoyin_with_tone = True
+
+        pinyin_with_tone.extend(c_with_tone)
+
+        c_without_tone = pinyin(c, style=Style.NORMAL, heteronym=True, errors=lambda x: "ERROR")
+        if len(c_without_tone[0]) > 1:
+            has_duoyin_without_tone = True
+        pinyin_without_tone.extend(c_without_tone)
+
+    if word_error_flag:
+        print("ERROR: pinyin not found: {}".format(word))
+    return {"pinyin_with_tone": flatten(pinyin_with_tone),
+            "pinyin_without_tone": flatten(pinyin_without_tone),
+            "has_duoyin_with_tone": has_duoyin_with_tone,
+            "has_duoyin_without_tone": has_duoyin_without_tone}
+
+
+def add_pinyin_columns(df_input, word_col):
+    pinyin_df = df_input.loc[:, [word_col]].apply(lambda x: generate_pinyin(x[0]), axis=1, result_type="expand")
+    return pd.concat([df_input, pinyin_df], axis=1)
+
+
+# words_dict_freq = generate_words(raw_words_path="./data/paragraph.txt")
+# df, chars = filter_words(words_dict_freq)
+# df = add_pinyin_columns(df, word_col="word")
+
+df_cidian = pd.read_csv("./data/pinyin_from_cidian.csv")
+df_cidian = add_pinyin_columns(df_cidian, word_col="word")
+df_cidian["pinyin_clean"] = df_cidian.loc[:, ["pinyin", "pinyin_without_tone"]].apply(lambda r: ["-".join(e) for e in r["pinyin_without_tone"] if "".join(e) == r["pinyin"]], axis=1)
+mask = df_cidian["pinyin_clean"].apply(lambda e: len(e) != 1)
+df_cidian.loc[~mask, "pinyin_clean"] = df_cidian.loc[~mask, "pinyin_clean"].apply(lambda e: e[0])
+df_cidian.loc[mask, "pinyin_clean"] = df_cidian.loc[mask, ["pinyin_without_tone", "has_duoyin_without_tone"]].apply(lambda r: None if r["has_duoyin_without_tone"] else "-".join(r["pinyin_without_tone"][0]), axis=1)
+df_cidian = df_cidian.loc[df_cidian["pinyin_clean"].apply(lambda e: e is not None), :]
+
+df_cidian.to_csv("./data/pinyin_cidian_clean.csv")
+
+output_pyim = "./data/XianDaiHanYuCiDian.pyim"
+
+
+def make_pyim_dict(pinyin_df, pyim_path, word_col, pinyin_col, freq_col=None):
+    group = pinyin_df.groupby(pinyin_col)
+    print("Aggregating words...")
+
+    if freq_col is not None:
+        word_series = group.apply(lambda cur_df: " ".join(cur_df.sort_values(by=freq_col, ascending=False)[word_col]))
+    else:
+        word_series = group.apply(lambda cur_df: " ".join(cur_df[word_col]))
+
+    print("Writing...")
+
+    with open(pyim_path, mode="w+", encoding="UTF-8", newline="\n") as f:
+        f.write(";; -*- coding: utf-8-unix; -*-\n")
+        for k, v in word_series.items():
+            f.write("{} {}\n".format(k, v))
+    print("Done.")
+
+
+make_pyim_dict(df_cidian, output_pyim, "word", "pinyin_clean")
